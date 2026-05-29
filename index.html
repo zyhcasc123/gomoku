@@ -148,13 +148,13 @@
 // ============ 常量 ============
 const SIZE = 15, CELL = 40, PADDING = 30, RADIUS = 17;
 
-// 多个公共 MQTT Broker，自动容错切换
+// MQTT Broker，国内节点优先 — 同一房间用确定性算法选同一台
 const BROKERS = [
-  'wss://broker.emqx.io:8084/mqtt',
-  'wss://test.mosquitto.org:8081/mqtt',
-  'wss://mqtt.eclipseprojects.io:443/mqtt',
-  'wss://broker.hivemq.com:8884/mqtt',
+  { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
+  { url: 'wss://broker.emqx.io:8084/mqtt',    name: 'EMQX全球' },
+  { url: 'wss://mqtt.eclipseprojects.io:443/mqtt', name: 'Eclipse' },
 ];
+	function pickBroker(rid) { return (parseInt(rid) * 7) % BROKERS.length; }
 
 // ============ DOM 引用 ============
 const canvas = document.getElementById('board');
@@ -175,8 +175,8 @@ let mode = 'local';
 let myColor = null;
 let mqttClient = null;
 let roomId = null;
-let waitingUndoAnswer = false;
-let brokerIndex = 0;
+let waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
+let brokerIdx = -1, connectRetry = 0, handshakeDone = false;
 
 // ============ 棋盘绘制 ============
 function drawBoard() {
@@ -264,7 +264,8 @@ function updateTurn() {
 // ============ 权限检查 ============
 function canIPlace() {
   if (gameOver) return false;
-  if (mode === 'local') return true;
+  if (mode === "local") return true;
+  if (!handshakeDone) return false;
   if (myColor === 'black' && currentPlayer === 1) return true;
   if (myColor === 'white' && currentPlayer === 2) return true;
   return false;
@@ -360,7 +361,7 @@ function resetGame() {
   stepCount = 0;
   lastMove = null;
   moveHistory = [];
-  waitingUndoAnswer = false;
+  waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
   document.getElementById('winnerOverlay').classList.remove('show');
   document.getElementById('undoOverlay').classList.remove('show');
   drawBoard();
@@ -382,7 +383,7 @@ function switchMode(newMode) {
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
   roomId = null;
   myColor = null;
-  waitingUndoAnswer = false;
+  waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
   document.getElementById('roomInfo').style.display = 'none';
   document.getElementById('roomIdDisplay').textContent = '';
   document.getElementById('undoOverlay').classList.remove('show');
@@ -391,7 +392,7 @@ function switchMode(newMode) {
   resetGame();
 }
 
-// ============ 联网通信（多 Broker 容错） ============
+// ============ 联网通信（确定性 Broker + 握手确认） ============
 function setStatus(text, isGood) {
   const el = document.getElementById('statusText');
   el.textContent = text;
@@ -409,22 +410,23 @@ function publish(obj) {
 
 function connectMQTT() {
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
+  if (brokerIdx < 0) brokerIdx = pickBroker(roomId);
+  const broker = BROKERS[brokerIdx];
+  setStatus('连接 ' + broker.name + '...', null);
 
-  const broker = BROKERS[brokerIndex % BROKERS.length];
-  setStatus('连接中...', null);
-  const clientId = 'gomoku_' + Math.random().toString(36).slice(2, 10);
-
-  mqttClient = mqtt.connect(broker, {
-    clientId,
-    clean: true,
-    reconnectPeriod: 0,       // 我们自己管理重连
-    connectTimeout: 8000,
-    keepalive: 30,
+  mqttClient = mqtt.connect(broker.url, {
+    clientId: 'gomoku_' + Math.random().toString(36).slice(2, 10),
+    clean: true, reconnectPeriod: 0,
+    connectTimeout: 10000, keepalive: 30,
   });
 
   mqttClient.on('connect', () => {
-    setStatus('已连接', true);
-    if (roomId) mqttClient.subscribe(peerTopic());
+    connectRetry = 0;
+    setStatus('已连接 ' + broker.name, true);
+    if (roomId) {
+      mqttClient.subscribe(peerTopic());
+      if (myColor === 'white') publish({ type: 'join' });
+    }
   });
 
   mqttClient.on('message', (topic, payload) => {
@@ -439,7 +441,7 @@ function connectMQTT() {
         document.getElementById('undoOverlay').classList.add('show');
         break;
       case 'undo_rsp':
-        waitingUndoAnswer = false;
+        waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
         if (data.accepted) { undoLocal(); setStatus('对方同意了悔棋', true); }
         else setStatus('对方拒绝了悔棋', false);
         break;
@@ -451,25 +453,62 @@ function connectMQTT() {
           updateTurn();
         }
         break;
+      case 'join':
+        if (myColor === 'black') {
+          publish({ type: 'join_ack' });
+          handshakeDone = true;
+          document.getElementById('waitingHint').style.display = 'none';
+          setStatus('对手已加入，对局开始！', true);
+        }
+        break;
+      case 'join_ack':
+        if (myColor === 'white') {
+          handshakeDone = true;
+          setStatus('已加入房间，对局开始！', true);
+        }
+        break;
+      case 'leave':
+        if (!gameOver) {
+          gameOver = true;
+          document.getElementById('winnerText').textContent = '💨 对方离开了房间';
+          document.getElementById('winnerOverlay').classList.add('show');
+          updateTurn();
+        }
+        break;
     }
   });
 
-  mqttClient.on('error', (err) => {
-    setStatus('连接失败，换线路重试...', false);
+  mqttClient.on('error', () => {
+    connectRetry++;
+    if (connectRetry >= 3) {
+      connectRetry = 0;
+      brokerIdx = (brokerIdx + 1) % BROKERS.length;
+      setStatus('切换线路...', false);
+    } else {
+      setStatus('连接失败，重试中 (' + connectRetry + '/3)...', false);
+    }
+    setTimeout(() => { if (roomId && !handshakeDone) connectMQTT(); }, 2000);
   });
 
   mqttClient.on('close', () => {
     if (!roomId) return;
-    // 自动切换下一个 broker 重连
-    brokerIndex++;
-    setStatus('断线重连中... (' + (brokerIndex % BROKERS.length + 1) + '/' + BROKERS.length + ')', false);
-    setTimeout(() => { if (roomId) connectMQTT(); }, 2000);
+    if (handshakeDone) {
+      connectRetry++;
+      const delay = connectRetry <= 3 ? 1500 : 5000;
+      if (connectRetry > 3) {
+        brokerIdx = (brokerIdx + 1) % BROKERS.length;
+        connectRetry = 0;
+      }
+      setStatus(connectRetry <= 3 ? '断线重连中... (' + connectRetry + '/3)' : '切换线路重连...', false);
+      setTimeout(() => { if (roomId) connectMQTT(); }, delay);
+    }
   });
 }
 
 function createRoom() {
   roomId = String(Math.floor(1000 + Math.random() * 9000));
   myColor = 'black';
+  brokerIdx = -1; connectRetry = 0; handshakeDone = false;
   connectMQTT();
   document.getElementById('roomIdDisplay').textContent = roomId;
   document.getElementById('roomInfo').style.display = 'flex';
@@ -484,6 +523,7 @@ function joinRoom() {
   if (rid.length !== 4) return setStatus('请输入4位房间号', false);
   roomId = rid;
   myColor = 'white';
+  brokerIdx = -1; connectRetry = 0; handshakeDone = false;
   connectMQTT();
   document.getElementById('roomIdDisplay').textContent = roomId;
   document.getElementById('roomInfo').style.display = 'flex';
@@ -494,7 +534,6 @@ function joinRoom() {
 
 // ============ 复制邀请链接 ============
 function copyLink() {
-  // 生成当前页面的链接 + 房间号
   const link = location.href.replace(location.search, '') + '?room=' + roomId;
   navigator.clipboard.writeText(link).then(() => {
     const btn = document.getElementById('btnCopy');
