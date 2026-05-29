@@ -143,7 +143,7 @@
   </div>
 </div>
 
-<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
 <script>
 // ============ 常量 ============
 const SIZE = 15, CELL = 40, PADDING = 30, RADIUS = 17;
@@ -371,9 +371,32 @@ function resetGame() {
   }
 }
 
+// ============ MQTT 动态加载（避免 CDN 卡住页面） ============
+let mqttLoaded = false, mqttLoading = false, mqttQueue = [];
+
+function needMQTT(cb) {
+  if (mqttLoaded) return cb();
+  mqttQueue.push(cb);
+  if (mqttLoading) return;
+  mqttLoading = true;
+  setStatus('加载联网模块...', null);
+  const s = document.createElement('script');
+  s.src = 'https://unpkg.com/mqtt/dist/mqtt.min.js';
+  s.onload = () => {
+    mqttLoaded = true; mqttLoading = false;
+    while (mqttQueue.length) mqttQueue.shift()();
+  };
+  s.onerror = () => {
+    mqttLoading = false; mqttQueue = [];
+    setStatus('联网模块加载失败，请检查网络后刷新', false);
+  };
+  document.head.appendChild(s);
+}
+
 // ============ 模式切换 ============
 function switchMode(newMode) {
   if (mode === newMode) return;
+  if (newMode === "online") needMQTT(() => {});
   mode = newMode;
   document.querySelectorAll('.mode-tab').forEach((t, i) => {
     t.classList.toggle('active', (i === 0 && newMode === 'local') || (i === 1 && newMode === 'online'));
@@ -509,7 +532,7 @@ function createRoom() {
   roomId = String(Math.floor(1000 + Math.random() * 9000));
   myColor = 'black';
   brokerIdx = -1; connectRetry = 0; handshakeDone = false;
-  connectMQTT();
+  needMQTT(() => connectMQTT());
   document.getElementById('roomIdDisplay').textContent = roomId;
   document.getElementById('roomInfo').style.display = 'flex';
   document.getElementById('waitingHint').style.display = '';
@@ -524,7 +547,7 @@ function joinRoom() {
   roomId = rid;
   myColor = 'white';
   brokerIdx = -1; connectRetry = 0; handshakeDone = false;
-  connectMQTT();
+  needMQTT(() => connectMQTT());
   document.getElementById('roomIdDisplay').textContent = roomId;
   document.getElementById('roomInfo').style.display = 'flex';
   document.getElementById('waitingHint').style.display = 'none';
