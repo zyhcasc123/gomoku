@@ -75,13 +75,12 @@
 <h1>五 子 棋</h1>
 
 <div class="mode-tabs">
-  <button class="mode-tab active" onclick="switchMode('local')">本地对战</button>
-  <button class="mode-tab" onclick="switchMode('online')">联网对战</button>
+  <button class="mode-tab active" id="tabLocal" onclick="switchMode('local')">本地对战</button>
+  <button class="mode-tab" id="tabOnline" onclick="switchMode('online')">联网对战</button>
 </div>
 
 <div class="online-panel" id="onlinePanel">
   <div style="color:#888;font-size:13px;text-align:center;margin-bottom:4px">
-    ⚡ 无需服务器，通过公共中继直接连接<br>
     创建房间 → 把房间号发给朋友 → 双方即可对战
   </div>
   <div>
@@ -97,10 +96,7 @@
     <div style="color:#aaa;font-size:13px">房间号（发给朋友）</div>
     <div class="room-id" id="roomIdDisplay"></div>
     <div style="color:#888;font-size:12px" id="waitingHint">等待对手加入...</div>
-    <div style="color:#777;font-size:12px;max-width:280px;text-align:center">
-      让朋友打开同一页面，进入"联网对战"，<br>输入此房间号，点击"加入房间"
-    </div>
-    <button class="btn-copy" id="btnCopy" onclick="copyLink()">📋 复制邀请链接</button>
+    <button class="btn-copy" id="btnCopy" onclick="copyLink()">复制邀请链接</button>
   </div>
 
   <div class="status-text" id="statusText">未连接</div>
@@ -110,7 +106,7 @@
   <div class="turn" id="turnDisplay">
     <span class="stone black-stone"></span> 黑棋回合
   </div>
-  <span style="color:#888">｜</span>
+  <span style="color:#888">|</span>
   <span style="color:#aaa" id="stepCount">第 0 手</span>
 </div>
 
@@ -121,7 +117,6 @@
   <button onclick="resetGame()">重新开始</button>
 </div>
 
-<!-- 胜利弹窗 -->
 <div class="overlay" id="winnerOverlay">
   <div class="dialog">
     <div id="winnerText"></div>
@@ -132,7 +127,6 @@
   </div>
 </div>
 
-<!-- 悔棋确认弹窗 -->
 <div class="overlay" id="undoOverlay">
   <div class="dialog">
     <div>对方请求悔棋，是否同意？</div>
@@ -143,49 +137,42 @@
   </div>
 </div>
 
-
 <script>
-// ============ 常量 ============
-const SIZE = 15, CELL = 40, PADDING = 30, RADIUS = 17;
+// ======================== 全部游戏逻辑 ========================
+(function(){
+'use strict';
 
-// MQTT Broker，国内节点优先 — 同一房间用确定性算法选同一台
-const BROKERS = [
+// ---------- 常量 ----------
+var SIZE = 15, CELL = 40, PADDING = 30, RADIUS = 17;
+var canvas = document.getElementById('board');
+var ctx = canvas.getContext('2d');
+canvas.width = PADDING * 2 + CELL * (SIZE - 1);
+canvas.height = PADDING * 2 + CELL * (SIZE - 1);
+
+// MQTT Broker 列表（国内节点优先）
+var BROKERS = [
   { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
   { url: 'wss://broker.emqx.io:8084/mqtt',    name: 'EMQX全球' },
   { url: 'wss://mqtt.eclipseprojects.io:443/mqtt', name: 'Eclipse' },
 ];
-	function pickBroker(rid) { return (parseInt(rid) * 7) % BROKERS.length; }
 
-// ============ DOM 引用 ============
-const canvas = document.getElementById('board');
-const ctx = canvas.getContext('2d');
-canvas.width = PADDING * 2 + CELL * (SIZE - 1);
-canvas.height = PADDING * 2 + CELL * (SIZE - 1);
+// ---------- 游戏状态 ----------
+var board = [], currentPlayer = 1, gameOver = false, stepCount = 0;
+var moveHistory = [], lastMove = null;
+for (var i = 0; i < SIZE; i++) { board[i] = []; for (var j = 0; j < SIZE; j++) board[i][j] = 0; }
 
-// ============ 游戏状态 ============
-let board = Array.from({ length: SIZE }, () => new Array(SIZE).fill(0));
-let currentPlayer = 1;
-let gameOver = false;
-let stepCount = 0;
-let moveHistory = [];
-let lastMove = null;
+// ---------- 联网状态 ----------
+var mode = 'local', myColor = null, mqttClient = null, roomId = null;
+var waitingUndoAnswer = false, brokerIdx = -1, connectRetry = 0, handshakeDone = false;
 
-// ============ 联网状态 ============
-let mode = 'local';
-let myColor = null;
-let mqttClient = null;
-let roomId = null;
-let waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
-let brokerIdx = -1, connectRetry = 0, handshakeDone = false;
-
-// ============ 棋盘绘制 ============
+// ---------- 棋盘绘制 ----------
 function drawBoard() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#d4a85c';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1;
-  for (let i = 0; i < SIZE; i++) {
+  for (var i = 0; i < SIZE; i++) {
     ctx.beginPath();
     ctx.moveTo(PADDING, PADDING + i * CELL);
     ctx.lineTo(PADDING + (SIZE - 1) * CELL, PADDING + i * CELL);
@@ -195,23 +182,23 @@ function drawBoard() {
     ctx.lineTo(PADDING + i * CELL, PADDING + (SIZE - 1) * CELL);
     ctx.stroke();
   }
-  const stars = [[3,3],[3,7],[3,11],[7,3],[7,7],[7,11],[11,3],[11,7],[11,11]];
-  for (const [r, c] of stars) {
+  var stars = [[3,3],[3,7],[3,11],[7,3],[7,7],[7,11],[11,3],[11,7],[11,11]];
+  for (var k = 0; k < stars.length; k++) {
     ctx.beginPath();
-    ctx.arc(PADDING + c * CELL, PADDING + r * CELL, 4, 0, Math.PI * 2);
+    ctx.arc(PADDING + stars[k][1] * CELL, PADDING + stars[k][0] * CELL, 4, 0, Math.PI * 2);
     ctx.fillStyle = '#333';
     ctx.fill();
   }
-  for (let r = 0; r < SIZE; r++) {
-    for (let c = 0; c < SIZE; c++) {
+  for (var r = 0; r < SIZE; r++) {
+    for (var c = 0; c < SIZE; c++) {
       if (board[r][c] === 0) continue;
-      const x = PADDING + c * CELL, y = PADDING + r * CELL;
+      var x = PADDING + c * CELL, y = PADDING + r * CELL;
       if (board[r][c] === 1) {
-        const g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, RADIUS);
+        var g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, RADIUS);
         g.addColorStop(0, '#555'); g.addColorStop(1, '#000');
         ctx.fillStyle = g;
       } else {
-        const g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, RADIUS);
+        var g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, RADIUS);
         g.addColorStop(0, '#fff'); g.addColorStop(1, '#999');
         ctx.fillStyle = g;
       }
@@ -220,23 +207,24 @@ function drawBoard() {
     }
   }
   if (lastMove) {
-    const x = PADDING + lastMove.c * CELL, y = PADDING + lastMove.r * CELL;
+    var lx = PADDING + lastMove.c * CELL, ly = PADDING + lastMove.r * CELL;
     ctx.fillStyle = '#e00';
-    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(lx, ly, 5, 0, Math.PI * 2); ctx.fill();
   }
 }
 
-// ============ 胜负检测 ============
+// ---------- 胜负检测 ----------
 function checkWin(r, c, player) {
-  for (const [dr, dc] of [[0,1],[1,0],[1,1],[1,-1]]) {
-    let count = 1;
-    for (let i = 1; i < 5; i++) {
-      const nr = r + dr * i, nc = c + dc * i;
+  var dirs = [[0,1],[1,0],[1,1],[1,-1]];
+  for (var d = 0; d < dirs.length; d++) {
+    var dr = dirs[d][0], dc = dirs[d][1], count = 1;
+    for (var i = 1; i < 5; i++) {
+      var nr = r + dr * i, nc = c + dc * i;
       if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] !== player) break;
       count++;
     }
-    for (let i = 1; i < 5; i++) {
-      const nr = r - dr * i, nc = c - dc * i;
+    for (var i = 1; i < 5; i++) {
+      var nr = r - dr * i, nc = c - dc * i;
       if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] !== player) break;
       count++;
     }
@@ -245,11 +233,11 @@ function checkWin(r, c, player) {
   return false;
 }
 
-// ============ 回合显示 ============
+// ---------- 回合显示 ----------
 function updateTurn() {
-  const d = document.getElementById('turnDisplay');
-  const c = document.getElementById('stepCount');
-  const myTurn = (currentPlayer === 1 && myColor === 'black') || (currentPlayer === 2 && myColor === 'white');
+  var d = document.getElementById('turnDisplay');
+  var c = document.getElementById('stepCount');
+  var myTurn = (currentPlayer === 1 && myColor === 'black') || (currentPlayer === 2 && myColor === 'white');
   if (gameOver) {
     d.innerHTML = '<span style="color:#d4a85c">游戏结束</span>';
   } else if (mode === 'online' && !myTurn) {
@@ -261,27 +249,16 @@ function updateTurn() {
   c.textContent = '第 ' + stepCount + ' 手';
 }
 
-// ============ 权限检查 ============
-function canIPlace() {
-  if (gameOver) return false;
-  if (mode === "local") return true;
-  if (!handshakeDone) return false;
-  if (myColor === 'black' && currentPlayer === 1) return true;
-  if (myColor === 'white' && currentPlayer === 2) return true;
-  return false;
-}
-
-// ============ 落子 ============
+// ---------- 落子 ----------
 function placeStone(r, c, player) {
   board[r][c] = player;
-  lastMove = { r, c };
-  moveHistory.push({ r, c, player });
+  lastMove = { r: r, c: c };
+  moveHistory.push({ r: r, c: c, player: player });
   stepCount++;
   drawBoard();
-
   if (checkWin(r, c, player)) {
     gameOver = true;
-    document.getElementById('winnerText').textContent = '🎉 ' + (player === 1 ? '黑棋' : '白棋') + '获胜！';
+    document.getElementById('winnerText').textContent = (player === 1 ? '黑棋' : '白棋') + '获胜！';
     document.getElementById('winnerOverlay').classList.add('show');
     if (mode === 'online') publish({ type: 'win' });
     updateTurn();
@@ -289,7 +266,7 @@ function placeStone(r, c, player) {
   }
   if (stepCount === SIZE * SIZE) {
     gameOver = true;
-    document.getElementById('winnerText').textContent = '🤝 平局！';
+    document.getElementById('winnerText').textContent = '平局！';
     document.getElementById('winnerOverlay').classList.add('show');
     return;
   }
@@ -297,55 +274,24 @@ function placeStone(r, c, player) {
   updateTurn();
 }
 
-// ============ 棋盘点击 ============
-canvas.addEventListener('click', (e) => {
-  if (!canIPlace()) return;
-  const rect = canvas.getBoundingClientRect();
-  const c = Math.round((e.clientX - rect.left - PADDING) / CELL);
-  const r = Math.round((e.clientY - rect.top - PADDING) / CELL);
-  if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return;
-  if (board[r][c] !== 0) return;
-
-  if (mode === 'local') {
-    placeStone(r, c, currentPlayer);
-  } else {
-    publish({ type: 'move', r, c, player: currentPlayer });
-    placeStone(r, c, currentPlayer);
-  }
-});
-
-canvas.addEventListener('mousemove', (e) => {
-  if (!canIPlace()) { canvas.style.cursor = 'default'; return; }
-  const rect = canvas.getBoundingClientRect();
-  const c = Math.round((e.clientX - rect.left - PADDING) / CELL);
-  const r = Math.round((e.clientY - rect.top - PADDING) / CELL);
-  canvas.style.cursor = (r >= 0 && r < SIZE && c >= 0 && c < SIZE && board[r][c] === 0) ? 'pointer' : 'default';
-});
-
-// ============ 悔棋 ============
-function onUndo() {
-  if (mode === 'local') {
-    undoLocal();
-  } else if (mode === 'online' && !gameOver) {
-    publish({ type: 'undo_req' });
-    waitingUndoAnswer = true;
-    setStatus('等待对方确认悔棋...');
-  }
+// 能否落子
+function canIPlace() {
+  if (gameOver) return false;
+  if (mode === 'local') return true;
+  if (!handshakeDone) return false;
+  if (myColor === 'black' && currentPlayer === 1) return true;
+  if (myColor === 'white' && currentPlayer === 2) return true;
+  return false;
 }
 
-function answerUndo(accepted) {
-  document.getElementById('undoOverlay').classList.remove('show');
-  publish({ type: 'undo_rsp', accepted });
-  if (accepted) undoLocal();
-}
-
+// ---------- 悔棋 ----------
 function undoLocal() {
   if (moveHistory.length === 0) return;
   if (gameOver) {
     gameOver = false;
     document.getElementById('winnerOverlay').classList.remove('show');
   }
-  const last = moveHistory.pop();
+  var last = moveHistory.pop();
   board[last.r][last.c] = 0;
   stepCount--;
   currentPlayer = last.player;
@@ -354,70 +300,82 @@ function undoLocal() {
   updateTurn();
 }
 
-function resetGame() {
-  board = Array.from({ length: SIZE }, () => new Array(SIZE).fill(0));
-  currentPlayer = 1;
-  gameOver = false;
-  stepCount = 0;
-  lastMove = null;
-  moveHistory = [];
-  waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
+window.onUndo = function() {
+  if (mode === 'local') {
+    undoLocal();
+  } else if (mode === 'online' && !gameOver && handshakeDone) {
+    publish({ type: 'undo_req' });
+    waitingUndoAnswer = true;
+    setStatus('等待对方确认悔棋...');
+  }
+};
+
+window.answerUndo = function(accepted) {
+  document.getElementById('undoOverlay').classList.remove('show');
+  publish({ type: 'undo_rsp', accepted: accepted });
+  if (accepted) undoLocal();
+};
+
+window.resetGame = function() {
+  for (var i = 0; i < SIZE; i++) for (var j = 0; j < SIZE; j++) board[i][j] = 0;
+  currentPlayer = 1; gameOver = false; stepCount = 0;
+  lastMove = null; moveHistory = []; waitingUndoAnswer = false;
   document.getElementById('winnerOverlay').classList.remove('show');
   document.getElementById('undoOverlay').classList.remove('show');
-  drawBoard();
-  updateTurn();
-  if (mode === 'online' && roomId) {
-    setStatus('对局中 · 房间号: ' + roomId);
-  }
-}
+  drawBoard(); updateTurn();
+  if (mode === 'online' && roomId) setStatus('对局中 - 房间 ' + roomId, true);
+};
 
-// ============ MQTT 动态加载（避免 CDN 卡住页面） ============
-let mqttLoaded = false, mqttLoading = false, mqttQueue = [];
-
-function needMQTT(cb) {
-  if (mqttLoaded) return cb();
-  mqttQueue.push(cb);
-  if (mqttLoading) return;
-  mqttLoading = true;
-  setStatus('加载联网模块...', null);
-  const s = document.createElement('script');
-  s.src = 'https://unpkg.com/mqtt/dist/mqtt.min.js';
-  s.onload = () => {
-    mqttLoaded = true; mqttLoading = false;
-    while (mqttQueue.length) mqttQueue.shift()();
-  };
-  s.onerror = () => {
-    mqttLoading = false; mqttQueue = [];
-    setStatus('联网模块加载失败，请检查网络后刷新', false);
-  };
-  document.head.appendChild(s);
-}
-
-// ============ 模式切换 ============
-function switchMode(newMode) {
+// ---------- 模式切换 ----------
+window.switchMode = function(newMode) {
   if (mode === newMode) return;
-  if (newMode === "online") needMQTT(() => {});
   mode = newMode;
-  document.querySelectorAll('.mode-tab').forEach((t, i) => {
-    t.classList.toggle('active', (i === 0 && newMode === 'local') || (i === 1 && newMode === 'online'));
-  });
+  document.getElementById('tabLocal').classList.toggle('active', newMode === 'local');
+  document.getElementById('tabOnline').classList.toggle('active', newMode === 'online');
   document.getElementById('onlinePanel').classList.toggle('show', newMode === 'online');
-
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
-  roomId = null;
-  myColor = null;
-  waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
+  roomId = null; myColor = null; waitingUndoAnswer = false;
+  handshakeDone = false; connectRetry = 0; brokerIdx = -1;
   document.getElementById('roomInfo').style.display = 'none';
   document.getElementById('roomIdDisplay').textContent = '';
   document.getElementById('undoOverlay').classList.remove('show');
   document.getElementById('statusText').textContent = '未连接';
   document.getElementById('roomInput').value = '';
-  resetGame();
+  window.resetGame();
+  if (newMode === 'online') loadMQTT();
+};
+
+// ---------- 联网：动态加载 MQTT ----------
+var mqttLoaded = false, mqttLoading = false, mqttQueue = [];
+
+function loadMQTT() {
+  if (mqttLoaded || mqttLoading) return;
+  mqttLoading = true;
+  setStatus('加载联网模块...');
+  var s = document.createElement('script');
+  // jsdelivr CDN 国内可访问
+  s.src = 'https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js';
+  s.onload = function() {
+    mqttLoaded = true; mqttLoading = false;
+    setStatus('就绪', true);
+    while (mqttQueue.length) { var cb = mqttQueue.shift(); cb(); }
+  };
+  s.onerror = function() {
+    mqttLoading = false; mqttQueue = [];
+    setStatus('联网模块加载失败，请刷新重试', false);
+  };
+  document.head.appendChild(s);
 }
 
-// ============ 联网通信（确定性 Broker + 握手确认） ============
+function ensureMQTT(cb) {
+  if (mqttLoaded) { cb(); return; }
+  mqttQueue.push(cb);
+  loadMQTT();
+}
+
+// ---------- 联网通信 ----------
 function setStatus(text, isGood) {
-  const el = document.getElementById('statusText');
+  var el = document.getElementById('statusText');
   el.textContent = text;
   el.style.color = isGood === false ? '#e55' : isGood ? '#8c8' : '#aaa';
 }
@@ -426,24 +384,24 @@ function myTopic()  { return 'gomoku/' + roomId + '/' + (myColor === 'black' ? '
 function peerTopic() { return 'gomoku/' + roomId + '/' + (myColor === 'black' ? 'guest' : 'host'); }
 
 function publish(obj) {
-  if (mqttClient && mqttClient.connected) {
-    mqttClient.publish(myTopic(), JSON.stringify(obj));
-  }
+  if (mqttClient && mqttClient.connected) mqttClient.publish(myTopic(), JSON.stringify(obj));
 }
+
+function pickBroker(rid) { return (parseInt(rid) * 7) % BROKERS.length; }
 
 function connectMQTT() {
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
   if (brokerIdx < 0) brokerIdx = pickBroker(roomId);
-  const broker = BROKERS[brokerIdx];
-  setStatus('连接 ' + broker.name + '...', null);
+  var broker = BROKERS[brokerIdx];
+  setStatus('连接 ' + broker.name + '...');
 
   mqttClient = mqtt.connect(broker.url, {
-    clientId: 'gomoku_' + Math.random().toString(36).slice(2, 10),
+    clientId: 'gmk_' + Math.random().toString(36).slice(2, 10),
     clean: true, reconnectPeriod: 0,
-    connectTimeout: 10000, keepalive: 30,
+    connectTimeout: 10000, keepalive: 30
   });
 
-  mqttClient.on('connect', () => {
+  mqttClient.on('connect', function() {
     connectRetry = 0;
     setStatus('已连接 ' + broker.name, true);
     if (roomId) {
@@ -452,9 +410,9 @@ function connectMQTT() {
     }
   });
 
-  mqttClient.on('message', (topic, payload) => {
-    let data;
-    try { data = JSON.parse(payload.toString()); } catch { return; }
+  mqttClient.on('message', function(topic, payload) {
+    var data;
+    try { data = JSON.parse(payload.toString()); } catch(e) { return; }
     switch (data.type) {
       case 'move':
         placeStone(data.r, data.c, data.player);
@@ -464,14 +422,14 @@ function connectMQTT() {
         document.getElementById('undoOverlay').classList.add('show');
         break;
       case 'undo_rsp':
-        waitingUndoAnswer = false; handshakeDone = false; connectRetry = 0; brokerIdx = -1;
+        waitingUndoAnswer = false;
         if (data.accepted) { undoLocal(); setStatus('对方同意了悔棋', true); }
         else setStatus('对方拒绝了悔棋', false);
         break;
       case 'win':
         if (!gameOver) {
           gameOver = true;
-          document.getElementById('winnerText').textContent = (myColor === 'black' ? '🎉 黑棋' : '🎉 白棋') + '获胜！';
+          document.getElementById('winnerText').textContent = (myColor === 'black' ? '白棋' : '黑棋') + '获胜！';
           document.getElementById('winnerOverlay').classList.add('show');
           updateTurn();
         }
@@ -493,7 +451,7 @@ function connectMQTT() {
       case 'leave':
         if (!gameOver) {
           gameOver = true;
-          document.getElementById('winnerText').textContent = '💨 对方离开了房间';
+          document.getElementById('winnerText').textContent = '对方离开了房间';
           document.getElementById('winnerOverlay').classList.add('show');
           updateTurn();
         }
@@ -501,88 +459,110 @@ function connectMQTT() {
     }
   });
 
-  mqttClient.on('error', () => {
+  mqttClient.on('error', function() {
     connectRetry++;
     if (connectRetry >= 3) {
       connectRetry = 0;
       brokerIdx = (brokerIdx + 1) % BROKERS.length;
       setStatus('切换线路...', false);
     } else {
-      setStatus('连接失败，重试中 (' + connectRetry + '/3)...', false);
+      setStatus('连接失败，重试(' + connectRetry + '/3)...', false);
     }
-    setTimeout(() => { if (roomId && !handshakeDone) connectMQTT(); }, 2000);
+    if (roomId) setTimeout(function() { connectMQTT(); }, 2000);
   });
 
-  mqttClient.on('close', () => {
+  mqttClient.on('close', function() {
     if (!roomId) return;
     if (handshakeDone) {
       connectRetry++;
-      const delay = connectRetry <= 3 ? 1500 : 5000;
-      if (connectRetry > 3) {
-        brokerIdx = (brokerIdx + 1) % BROKERS.length;
-        connectRetry = 0;
-      }
-      setStatus(connectRetry <= 3 ? '断线重连中... (' + connectRetry + '/3)' : '切换线路重连...', false);
-      setTimeout(() => { if (roomId) connectMQTT(); }, delay);
+      var delay = connectRetry <= 3 ? 1500 : 5000;
+      if (connectRetry > 3) { brokerIdx = (brokerIdx + 1) % BROKERS.length; connectRetry = 0; }
+      setStatus('断线重连...', false);
+      setTimeout(function() { if (roomId) connectMQTT(); }, delay);
     }
   });
 }
 
-function createRoom() {
-  roomId = String(Math.floor(1000 + Math.random() * 9000));
-  myColor = 'black';
-  brokerIdx = -1; connectRetry = 0; handshakeDone = false;
-  needMQTT(() => connectMQTT());
-  document.getElementById('roomIdDisplay').textContent = roomId;
-  document.getElementById('roomInfo').style.display = 'flex';
-  document.getElementById('waitingHint').style.display = '';
-  document.getElementById('statusText').textContent = '';
-  setStatus('等待对手加入...', true);
-  resetGame();
-}
-
-function joinRoom() {
-  const rid = document.getElementById('roomInput').value.trim();
-  if (rid.length !== 4) return setStatus('请输入4位房间号', false);
-  roomId = rid;
-  myColor = 'white';
-  brokerIdx = -1; connectRetry = 0; handshakeDone = false;
-  needMQTT(() => connectMQTT());
-  document.getElementById('roomIdDisplay').textContent = roomId;
-  document.getElementById('roomInfo').style.display = 'flex';
-  document.getElementById('waitingHint').style.display = 'none';
-  setStatus('加入房间中...', true);
-  resetGame();
-}
-
-// ============ 复制邀请链接 ============
-function copyLink() {
-  const link = location.href.replace(location.search, '') + '?room=' + roomId;
-  navigator.clipboard.writeText(link).then(() => {
-    const btn = document.getElementById('btnCopy');
-    btn.textContent = '✅ 链接已复制！';
-    btn.classList.add('copied');
-    setTimeout(() => {
-      btn.textContent = '📋 复制邀请链接';
-      btn.classList.remove('copied');
-    }, 2000);
-  }).catch(() => {
-    prompt('复制以下链接分享给朋友:', link);
+window.createRoom = function() {
+  ensureMQTT(function() {
+    roomId = String(Math.floor(1000 + Math.random() * 9000));
+    myColor = 'black';
+    brokerIdx = -1; connectRetry = 0; handshakeDone = false;
+    connectMQTT();
+    document.getElementById('roomIdDisplay').textContent = roomId;
+    document.getElementById('roomInfo').style.display = 'flex';
+    document.getElementById('waitingHint').style.display = '';
+    document.getElementById('statusText').textContent = '';
+    setStatus('等待对手加入...', true);
+    window.resetGame();
   });
+};
+
+window.joinRoom = function() {
+  var rid = document.getElementById('roomInput').value.trim();
+  if (rid.length !== 4) return setStatus('请输入4位房间号', false);
+  ensureMQTT(function() {
+    roomId = rid;
+    myColor = 'white';
+    brokerIdx = -1; connectRetry = 0; handshakeDone = false;
+    connectMQTT();
+    document.getElementById('roomIdDisplay').textContent = roomId;
+    document.getElementById('roomInfo').style.display = 'flex';
+    document.getElementById('waitingHint').style.display = 'none';
+    setStatus('加入房间中...', true);
+    window.resetGame();
+  });
+};
+
+window.copyLink = function() {
+  var link = location.href.replace(location.search, '') + '?room=' + roomId;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(function() {
+      var btn = document.getElementById('btnCopy');
+      btn.textContent = '链接已复制！';
+      btn.classList.add('copied');
+      setTimeout(function() { btn.textContent = '复制邀请链接'; btn.classList.remove('copied'); }, 2000);
+    }).catch(function() { prompt('复制以下链接分享给朋友:', link); });
+  } else {
+    prompt('复制以下链接分享给朋友:', link);
+  }
+};
+
+// ---------- 棋盘点击 ----------
+canvas.addEventListener('click', function(e) {
+  if (!canIPlace()) return;
+  var rect = canvas.getBoundingClientRect();
+  var c = Math.round((e.clientX - rect.left - PADDING) / CELL);
+  var r = Math.round((e.clientY - rect.top - PADDING) / CELL);
+  if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return;
+  if (board[r][c] !== 0) return;
+  if (mode === 'local') {
+    placeStone(r, c, currentPlayer);
+  } else {
+    publish({ type: 'move', r: r, c: c, player: currentPlayer });
+    placeStone(r, c, currentPlayer);
+  }
+});
+
+canvas.addEventListener('mousemove', function(e) {
+  if (!canIPlace()) { canvas.style.cursor = 'default'; return; }
+  var rect = canvas.getBoundingClientRect();
+  var c = Math.round((e.clientX - rect.left - PADDING) / CELL);
+  var r = Math.round((e.clientY - rect.top - PADDING) / CELL);
+  canvas.style.cursor = (r >= 0 && r < SIZE && c >= 0 && c < SIZE && board[r][c] === 0) ? 'pointer' : 'default';
+});
+
+// ---------- 初始化 ----------
+drawBoard();
+updateTurn();
+var params = new URLSearchParams(location.search);
+var roomParam = params.get('room');
+if (roomParam) {
+  window.switchMode('online');
+  document.getElementById('roomInput').value = roomParam;
 }
 
-// ============ 初始化 ============
-function init() {
-  drawBoard();
-  updateTurn();
-  const params = new URLSearchParams(location.search);
-  const roomParam = params.get('room');
-  if (roomParam) {
-    switchMode('online');
-    document.getElementById('roomInput').value = roomParam;
-  }
-}
-init();
+})();
 </script>
 </body>
 </html>
