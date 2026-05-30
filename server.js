@@ -5,8 +5,30 @@ const { WebSocketServer } = require('ws');
 
 const PORT = 3000;
 
-// HTTP 服务器，提供静态文件
+// 读取 cloudflared 隧道 URL
+let tunnelUrl = '';
+try {
+  tunnelUrl = fs.readFileSync(path.join(__dirname, 'tunnel_url.txt'), 'utf-8').trim();
+} catch (e) {}
+
+// HTTP 服务器
 const server = http.createServer((req, res) => {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // API: 返回隧道地址供前端连接
+  if (req.url.startsWith('/api/config')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      tunnelUrl: tunnelUrl,
+      wsUrl: tunnelUrl ? tunnelUrl.replace('https://', 'wss://') : '',
+    }));
+    return;
+  }
+
+  // 静态文件
   const urlPath = req.url.split('?')[0];
   let filePath = urlPath === '/' ? '/index.html' : urlPath;
   filePath = path.join(__dirname, filePath);
@@ -29,23 +51,10 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// WebSocket 绑定到同一个 HTTP 服务器
+// WebSocket
 const wss = new WebSocketServer({ server });
 
-// 预计算分享用的 IP 地址
-const os = require('os');
-const ifaces = os.networkInterfaces();
-let shareHost = 'localhost';
-for (const name of Object.keys(ifaces)) {
-  for (const iface of ifaces[name]) {
-    if (iface.family === 'IPv4' && !iface.internal) {
-      shareHost = iface.address;
-      break;
-    }
-  }
-}
-
-const rooms = new Map(); // roomId -> { players: [{ws, color}], currentPlayer: 1 }
+const rooms = new Map();
 
 function genRoomId() {
   let id;
@@ -67,6 +76,7 @@ wss.on('connection', (ws) => {
 
     switch (data.type) {
 
+      // 创建房间（MQTT 兼容协议）
       case 'create': {
         const roomId = genRoomId();
         rooms.set(roomId, {
@@ -75,11 +85,13 @@ wss.on('connection', (ws) => {
         });
         myRoomId = roomId;
         myColor = 'black';
-        send(ws, { type: 'room', roomId, color: 'black', status: 'waiting', shareHost: shareHost + ':' + PORT });
+        send(ws, { type: 'room', roomId, color: 'black', status: 'waiting' });
         break;
       }
 
+      // 加入房间（MQTT 兼容协议）
       case 'join': {
+        // 使用 join 协议：客户端发 {type:'join', roomId}
         const room = rooms.get(data.roomId);
         if (!room) return send(ws, { type: 'error', msg: '房间不存在' });
         if (room.players.length >= 2) return send(ws, { type: 'error', msg: '房间已满' });
@@ -89,11 +101,12 @@ wss.on('connection', (ws) => {
         myColor = 'white';
 
         // 通知双方
-        send(room.players[0].ws, { type: 'room', roomId: data.roomId, color: 'black', status: 'playing', shareHost: shareHost + ':' + PORT });
-        send(ws, { type: 'room', roomId: data.roomId, color: 'white', status: 'playing', shareHost: shareHost + ':' + PORT });
+        send(room.players[0].ws, { type: 'join_ack' });
+        send(ws, { type: 'room', roomId: data.roomId, color: 'white', status: 'playing' });
         break;
       }
 
+      // 落子
       case 'move': {
         const room = rooms.get(myRoomId);
         if (!room) return;
@@ -102,6 +115,7 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // 悔棋请求
       case 'undo_req': {
         const room = rooms.get(myRoomId);
         if (!room) return;
@@ -110,6 +124,7 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // 悔棋应答
       case 'undo_rsp': {
         const room = rooms.get(myRoomId);
         if (!room) return;
@@ -118,11 +133,12 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // 获胜
       case 'win': {
         const room = rooms.get(myRoomId);
         if (!room) return;
         const opponent = room.players.find(p => p.color !== myColor);
-        if (opponent) send(opponent.ws, { type: 'lose' });
+        if (opponent) send(opponent.ws, { type: 'win' });
         break;
       }
 
@@ -140,17 +156,9 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, () => {
-  const os = require('os');
-  const ifaces = os.networkInterfaces();
-  const ips = [];
-  for (const name of Object.keys(ifaces)) {
-    for (const iface of ifaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) ips.push(iface.address);
-    }
-  }
-  console.log(`五子棋服务器已启动:`);
-  console.log(`  本机: http://localhost:${PORT}`);
-  for (const ip of ips) {
-    console.log(`  局域网: http://${ip}:${PORT}`);
+  console.log('五子棋服务器已启动:');
+  console.log('  本机: http://localhost:' + PORT);
+  if (tunnelUrl) {
+    console.log('  公网: ' + tunnelUrl);
   }
 });
