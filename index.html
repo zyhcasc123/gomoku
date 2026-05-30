@@ -427,7 +427,18 @@ function connectMQTT() {
     setStatus('已连接 ' + broker.name, true);
     if (roomId) {
       mqttClient.subscribe(peerTopic());
-      if (myColor === 'white') publish({ type: 'join' });
+      if (myColor === 'white') {
+        // 每隔2秒重发join直到收到确认
+        var joinRetry = 0;
+        function sendJoin() {
+          if (handshakeDone) return;
+          publish({ type: 'join' });
+          joinRetry++;
+          if (joinRetry < 10) setTimeout(sendJoin, 2000);
+          else if (!handshakeDone) setStatus('未收到房主响应，请确认房间号正确', false);
+        }
+        sendJoin();
+      }
     }
     // 心跳：每20秒发送ping，防止手机NAT断连
     clearInterval(heartbeatTimer);
