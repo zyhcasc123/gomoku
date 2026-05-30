@@ -149,11 +149,12 @@ var ctx = canvas.getContext('2d');
 canvas.width = PADDING * 2 + CELL * (SIZE - 1);
 canvas.height = PADDING * 2 + CELL * (SIZE - 1);
 
-// MQTT Broker 列表（国内节点优先）
 var BROKERS = [
   { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
   { url: 'wss://broker.emqx.io:8084/mqtt',    name: 'EMQX全球' },
+  { url: 'wss://test.mosquitto.org:8081/mqtt', name: 'Mosquitto' },
   { url: 'wss://mqtt.eclipseprojects.io:443/mqtt', name: 'Eclipse' },
+  { url: 'wss://broker.hivemq.com:8884/mqtt',  name: 'HiveMQ' },
 ];
 
 // ---------- 游戏状态 ----------
@@ -389,6 +390,18 @@ function publish(obj) {
 
 function pickBroker(rid) { return (parseInt(rid) * 7) % BROKERS.length; }
 
+// 页面从后台恢复时检查连接
+function onVisibility() {
+  if (document.hidden) return;
+  if (mqttClient && !mqttClient.connected && roomId) {
+    setStatus('页面恢复，重新连接...');
+    connectRetry = 0;
+    connectMQTT();
+  }
+}
+
+var heartbeatTimer = null;
+
 function connectMQTT() {
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
   if (brokerIdx < 0) brokerIdx = pickBroker(roomId);
@@ -398,7 +411,7 @@ function connectMQTT() {
   mqttClient = mqtt.connect(broker.url, {
     clientId: 'gmk_' + Math.random().toString(36).slice(2, 10),
     clean: true, reconnectPeriod: 0,
-    connectTimeout: 10000, keepalive: 30
+    connectTimeout: 15000, keepalive: 15
   });
 
   mqttClient.on('connect', function() {
@@ -408,6 +421,13 @@ function connectMQTT() {
       mqttClient.subscribe(peerTopic());
       if (myColor === 'white') publish({ type: 'join' });
     }
+    // 心跳：每20秒发送ping，防止手机NAT断连
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(function() {
+      if (mqttClient && mqttClient.connected) publish({ type: 'ping' });
+    }, 20000);
+    // 页面可见性变化时检查连接
+    document.addEventListener('visibilitychange', onVisibility);
   });
 
   mqttClient.on('message', function(topic, payload) {
@@ -460,6 +480,7 @@ function connectMQTT() {
   });
 
   mqttClient.on('error', function() {
+    clearInterval(heartbeatTimer);
     connectRetry++;
     if (connectRetry >= 3) {
       connectRetry = 0;
@@ -472,6 +493,8 @@ function connectMQTT() {
   });
 
   mqttClient.on('close', function() {
+    clearInterval(heartbeatTimer);
+    document.removeEventListener('visibilitychange', onVisibility);
     if (!roomId) return;
     if (handshakeDone) {
       connectRetry++;
