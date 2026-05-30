@@ -154,15 +154,13 @@ var ctx = canvas.getContext('2d');
 canvas.width = PADDING * 2 + CELL * (SIZE - 1);
 canvas.height = PADDING * 2 + CELL * (SIZE - 1);
 
-// cloudflared 隧道地址（优先使用，443端口手机不封）
-var TUNNEL_URL = 'https://houses-midlands-precisely-officers.trycloudflare.com';
-
 var BROKERS = [
-  { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
-  { url: 'wss://broker.emqx.io:8084/mqtt',    name: 'EMQX全球' },
-  { url: 'wss://test.mosquitto.org:8081/mqtt', name: 'Mosquitto' },
+  // 只走 443 端口，手机运营商不封
   { url: 'wss://mqtt.eclipseprojects.io:443/mqtt', name: 'Eclipse' },
+  { url: 'wss://broker.emqx.io:8084/mqtt',    name: 'EMQX全球' },
+  { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
   { url: 'wss://broker.hivemq.com:8884/mqtt',  name: 'HiveMQ' },
+  { url: 'wss://test.mosquitto.org:8081/mqtt', name: 'Mosquitto' },
 ];
 
 // ---------- 游戏状态 ----------
@@ -173,7 +171,7 @@ for (var i = 0; i < SIZE; i++) { board[i] = []; for (var j = 0; j < SIZE; j++) b
 // ---------- 联网状态 ----------
 var mode = 'local', myColor = null, mqttClient = null, roomId = null;
 var waitingUndoAnswer = false, brokerIdx = -1, connectRetry = 0, handshakeDone = false;
-var wsClient = null, useWS = false, wsReconnectTimer = null;
+
 
 // ---------- 棋盘绘制 ----------
 function drawBoard() {
@@ -346,8 +344,6 @@ window.switchMode = function(newMode) {
   if (mqttClient) { mqttClient.end(true); mqttClient = null; }
   roomId = null; myColor = null; waitingUndoAnswer = false;
   handshakeDone = false; connectRetry = 0; brokerIdx = -1;
-  if (wsClient) { wsClient.onclose = null; wsClient.close(); wsClient = null; }
-  useWS = false; clearTimeout(wsReconnectTimer);
   document.getElementById('roomInfo').style.display = 'none';
   document.getElementById('roomIdDisplay').textContent = '';
   document.getElementById('undoOverlay').classList.remove('show');
@@ -396,115 +392,11 @@ function myTopic()  { return 'gomoku/' + roomId + '/' + (myColor === 'black' ? '
 function peerTopic() { return 'gomoku/' + roomId + '/' + (myColor === 'black' ? 'guest' : 'host'); }
 
 function publish(obj) {
-  if (useWS && wsClient && wsClient.readyState === 1) {
-    wsClient.send(JSON.stringify(obj));
-  } else if (!useWS && mqttClient && mqttClient.connected) {
-    mqttClient.publish(myTopic(), JSON.stringify(obj));
-  }
+  if (mqttClient && mqttClient.connected) mqttClient.publish(myTopic(), JSON.stringify(obj));
 }
 
 function pickBroker(rid) { return (parseInt(rid) * 7) % BROKERS.length; }
 
-// WebSocket 直连（cloudflared隧道，443端口）
-function connectWS() {
-  if (wsClient) { wsClient.onclose = null; wsClient.close(); wsClient = null; }
-  setStatus('连接云端...');
-  wsClient = new WebSocket(TUNNEL_URL.replace('https://', 'wss://'));
-  wsClient.onopen = function() {
-    useWS = true; connectRetry = 0;
-    setStatus('已连接云端', true);
-    if (myColor === 'black') {
-      wsClient.send(JSON.stringify({ type: 'create', roomId: roomId }));
-    } else {
-      wsClient.send(JSON.stringify({ type: 'join', roomId: roomId }));
-    }
-  };
-  wsClient.onmessage = function(e) {
-    var data;
-    try { data = JSON.parse(e.data); } catch(err) { return; }
-    switch (data.type) {
-      case 'room':
-        roomId = data.roomId;
-        myColor = data.color;
-        document.getElementById('roomIdDisplay').textContent = roomId;
-        document.getElementById('roomInfo').style.display = 'flex';
-        if (data.color === 'black') {
-          document.getElementById('waitingHint').style.display = data.status === 'waiting' ? '' : 'none';
-          if (data.status === 'waiting') {
-            setStatus('等待对手加入...', true);
-          } else {
-            handshakeDone = true;
-            setStatus('对局开始！', true);
-          }
-        } else {
-          document.getElementById('waitingHint').style.display = 'none';
-          handshakeDone = true;
-          setStatus('对局开始！', true);
-        }
-        break;
-      case 'join_ack':
-        handshakeDone = true;
-        document.getElementById('waitingHint').style.display = 'none';
-        setStatus('对手已加入，对局开始！', true);
-        break;
-      case 'move':
-        placeStone(data.r, data.c, data.player);
-        break;
-      case 'undo_req':
-        waitingUndoAnswer = true;
-        document.getElementById('undoOverlay').classList.add('show');
-        break;
-      case 'undo_rsp':
-        waitingUndoAnswer = false;
-        if (data.accepted) { undoLocal(); setStatus('对方同意了悔棋', true); }
-        else setStatus('对方拒绝了悔棋', false);
-        break;
-      case 'win':
-        if (!gameOver) {
-          gameOver = true;
-          document.getElementById('winnerText').textContent = (myColor === 'black' ? '白棋' : '黑棋') + '获胜！';
-          document.getElementById('winnerOverlay').classList.add('show');
-          updateTurn();
-        }
-        break;
-      case 'leave':
-        if (!gameOver) {
-          gameOver = true;
-          document.getElementById('winnerText').textContent = '对方离开了房间';
-          document.getElementById('winnerOverlay').classList.add('show');
-          updateTurn();
-        }
-        break;
-      case 'error':
-        setStatus(data.msg, false);
-        wsClient.close(); wsClient = null; useWS = false;
-        break;
-    }
-  };
-  wsClient.onerror = function() { /* 由 onclose 处理 */ };
-  wsClient.onclose = function() {
-    wsClient = null;
-    if (!useWS) {
-      // WS 连接失败，回退到 MQTT
-      setStatus('云端不可用，切换中继...');
-      fallbackToMQTT();
-      return;
-    }
-    // 运行中断连
-    if (roomId) {
-      clearTimeout(wsReconnectTimer);
-      wsReconnectTimer = setTimeout(function() {
-        if (roomId && useWS) connectWS();
-      }, 2000);
-    }
-  };
-}
-
-function fallbackToMQTT() {
-  useWS = false;
-  if (wsClient) { wsClient.onclose = null; wsClient.close(); wsClient = null; }
-  connectMQTT();
-}
 
 // 页面从后台恢复时检查连接
 function onVisibility() {
@@ -527,7 +419,7 @@ function connectMQTT() {
   mqttClient = mqtt.connect(broker.url, {
     clientId: 'gmk_' + Math.random().toString(36).slice(2, 10),
     clean: true, reconnectPeriod: 0,
-    connectTimeout: 15000, keepalive: 15
+    connectTimeout: 8000, keepalive: 15
   });
 
   mqttClient.on('connect', function() {
@@ -623,32 +515,34 @@ function connectMQTT() {
 }
 
 window.createRoom = function() {
-  roomId = String(Math.floor(1000 + Math.random() * 9000));
-  myColor = 'black';
-  document.getElementById('roomIdDisplay').textContent = roomId;
-  document.getElementById('roomInfo').style.display = 'flex';
-  document.getElementById('waitingHint').style.display = '';
-  document.getElementById('statusText').textContent = '';
-  handshakeDone = false;
-  window.resetGame();
-  // 优先尝试 WebSocket 直连（cloudflared隧道）
-  setStatus('正在连接...', null);
-  connectWS();
+  ensureMQTT(function() {
+    roomId = String(Math.floor(1000 + Math.random() * 9000));
+    myColor = 'black';
+    brokerIdx = -1; connectRetry = 0; handshakeDone = false;
+    connectMQTT();
+    document.getElementById('roomIdDisplay').textContent = roomId;
+    document.getElementById('roomInfo').style.display = 'flex';
+    document.getElementById('waitingHint').style.display = '';
+    document.getElementById('statusText').textContent = '';
+    setStatus('等待对手加入...', true);
+    window.resetGame();
+  });
 };
 
 window.joinRoom = function() {
   var rid = document.getElementById('roomInput').value.trim();
   if (rid.length !== 4) return setStatus('请输入4位房间号', false);
-  roomId = rid;
-  myColor = 'white';
-  document.getElementById('roomIdDisplay').textContent = roomId;
-  document.getElementById('roomInfo').style.display = 'flex';
-  document.getElementById('waitingHint').style.display = 'none';
-  handshakeDone = false;
-  window.resetGame();
-  // 优先尝试 WebSocket 直连（cloudflared隧道）
-  setStatus('正在连接...', null);
-  connectWS();
+  ensureMQTT(function() {
+    roomId = rid;
+    myColor = 'white';
+    brokerIdx = -1; connectRetry = 0; handshakeDone = false;
+    connectMQTT();
+    document.getElementById('roomIdDisplay').textContent = roomId;
+    document.getElementById('roomInfo').style.display = 'flex';
+    document.getElementById('waitingHint').style.display = 'none';
+    setStatus('加入房间中...', true);
+    window.resetGame();
+  });
 };
 
 window.copyLink = function() {
