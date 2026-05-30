@@ -72,6 +72,11 @@
 </head>
 <body>
 
+<div id="wxTip" style="display:none;background:#e74c3c;color:#fff;padding:12px 20px;border-radius:8px;text-align:center;margin-bottom:12px;max-width:360px;line-height:1.8;font-size:14px">
+  <strong>请用浏览器打开</strong><br>
+  点击右上角 <span style="font-size:18px">···</span> → <strong>在浏览器中打开</strong>
+</div>
+
 <h1>五 子 棋</h1>
 
 <div class="mode-tabs">
@@ -681,6 +686,10 @@ canvas.addEventListener('mousemove', function(e) {
 });
 
 // ---------- 初始化 ----------
+	// 微信浏览器检测
+	if (/MicroMessenger/i.test(navigator.userAgent)) {
+	  document.getElementById('wxTip').style.display = 'block';
+	}
 drawBoard();
 updateTurn();
 var params = new URLSearchParams(location.search);
