@@ -155,7 +155,7 @@ canvas.width = PADDING * 2 + CELL * (SIZE - 1);
 canvas.height = PADDING * 2 + CELL * (SIZE - 1);
 
 // cloudflared 隧道地址（优先使用，443端口手机不封）
-var TUNNEL_URL = 'https://quest-investors-removed-connection.trycloudflare.com';
+var TUNNEL_URL = 'https://houses-midlands-precisely-officers.trycloudflare.com';
 
 var BROKERS = [
   { url: 'wss://broker-cn.emqx.io:8084/mqtt', name: 'EMQX中国' },
@@ -414,7 +414,7 @@ function connectWS() {
     useWS = true; connectRetry = 0;
     setStatus('已连接云端', true);
     if (myColor === 'black') {
-      wsClient.send(JSON.stringify({ type: 'create' }));
+      wsClient.send(JSON.stringify({ type: 'create', roomId: roomId }));
     } else {
       wsClient.send(JSON.stringify({ type: 'join', roomId: roomId }));
     }
@@ -426,15 +426,19 @@ function connectWS() {
       case 'room':
         roomId = data.roomId;
         myColor = data.color;
-        handshakeDone = true;
         document.getElementById('roomIdDisplay').textContent = roomId;
         document.getElementById('roomInfo').style.display = 'flex';
         if (data.color === 'black') {
           document.getElementById('waitingHint').style.display = data.status === 'waiting' ? '' : 'none';
-          if (data.status === 'playing') setStatus('对局开始！', true);
-          else setStatus('等待对手加入...', true);
+          if (data.status === 'waiting') {
+            setStatus('等待对手加入...', true);
+          } else {
+            handshakeDone = true;
+            setStatus('对局开始！', true);
+          }
         } else {
           document.getElementById('waitingHint').style.display = 'none';
+          handshakeDone = true;
           setStatus('对局开始！', true);
         }
         break;

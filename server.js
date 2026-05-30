@@ -78,7 +78,7 @@ wss.on('connection', (ws) => {
 
       // 创建房间（MQTT 兼容协议）
       case 'create': {
-        const roomId = genRoomId();
+        const roomId = data.roomId || genRoomId();
         rooms.set(roomId, {
           players: [{ ws, color: 'black' }],
           currentPlayer: 1,
